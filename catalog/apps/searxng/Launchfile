@@ -16,7 +16,10 @@ env:
     sensitive: true
     description: "Secret key for session encryption"
 storage:
-  data:
+  config:
     path: /etc/searxng
+    persistent: true
+  cache:
+    path: /var/cache/searxng
     persistent: true
 restart: always

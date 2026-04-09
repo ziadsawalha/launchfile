@@ -31,4 +31,10 @@ env:
   URL:
     required: true
     description: "Public-facing URL of the Outline instance"
+  FILE_STORAGE:
+    default: "local"
+storage:
+  data:
+    path: /var/lib/outline/data
+    persistent: true
 restart: always

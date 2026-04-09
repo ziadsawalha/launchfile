@@ -22,11 +22,15 @@ env:
   LISTMONK_app__address:
     default: "0.0.0.0:9000"
     description: "Listen address for the web server"
-  LISTMONK_app__admin_username:
+  LISTMONK_ADMIN_USER:
     default: "listmonk"
     description: "Admin username"
-  LISTMONK_app__admin_password:
+  LISTMONK_ADMIN_PASSWORD:
     generator: secret
     sensitive: true
     description: "Admin password"
+storage:
+  uploads:
+    path: /listmonk/uploads
+    persistent: true
 restart: always

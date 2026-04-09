@@ -11,7 +11,7 @@ provides:
     port: 80
     exposed: true
 requires:
-  - type: mysql
+  - type: mariadb
     set_env:
       DB_HOST: $host
       DB_PORT: $port
