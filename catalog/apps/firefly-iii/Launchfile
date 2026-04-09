@@ -3,6 +3,7 @@ version: launch/v1
 name: firefly-iii
 description: "Personal finance manager with budgeting and reporting"
 repository: https://github.com/firefly-iii/firefly-iii
+website: https://firefly-iii.org
 logo: https://raw.githubusercontent.com/firefly-iii/firefly-iii/main/public/v1/images/logo.svg
 
 image: fireflyiii/core:latest
@@ -19,13 +20,14 @@ requires:
       DB_DATABASE: $name
       DB_USERNAME: $user
       DB_PASSWORD: $password
-env:
-  APP_KEY:
+secrets:
+  app-key:
     generator: secret
-    sensitive: true
-    description: "Laravel application encryption key — must be exactly 32 chars"
+env:
+  APP_KEY: "base64:${secrets.app-key|base64}"
   APP_URL:
     default: "http://localhost"
+health: /login
 storage:
   uploads:
     path: /var/www/html/storage/upload
