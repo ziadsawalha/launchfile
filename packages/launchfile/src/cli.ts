@@ -8,6 +8,7 @@
  *   launchfile status [id|slug|name]   Show deployment status
  *   launchfile logs [id|slug|name]     View logs
  *   launchfile list                    List all deployments
+ *   launchfile diagnose                Show last error details
  *   launchfile validate [path]         Validate a Launchfile
  *   launchfile inspect [path]          Print normalized JSON
  *   launchfile schema                  Dump JSON Schema
@@ -22,7 +23,8 @@ import { handleStatus } from "./commands/status.js";
 import { handleLogs } from "./commands/logs.js";
 import { handleList } from "./commands/list.js";
 import { handleBootstrap } from "./commands/bootstrap.js";
-import { cmdValidate, cmdInspect, cmdSchema } from "@launchfile/sdk";
+import { handleDiagnose } from "./commands/diagnose.js";
+import { cmdValidate, cmdInspect, cmdSchema, LaunchError } from "@launchfile/sdk";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const { version: VERSION } = JSON.parse(
@@ -67,6 +69,7 @@ Usage:
   launchfile logs [id|slug]          View logs
   launchfile bootstrap [id|slug]     Run post-start setup (commands.bootstrap)
   launchfile list                    List all deployments
+  launchfile diagnose                Show last error in detail
   launchfile validate [path]         Validate a Launchfile
   launchfile inspect [path]          Print normalized JSON
   launchfile schema                  Dump JSON Schema to stdout
@@ -141,6 +144,12 @@ async function main(): Promise<void> {
 			});
 			break;
 
+		case "diagnose":
+			await handleDiagnose({
+				json: hasFlag("json"),
+			});
+			break;
+
 		case "validate": {
 			const path = resolve(target ?? "./Launchfile");
 			cmdValidate(path, { json: hasFlag("json"), quiet: hasFlag("quiet"), noColor });
@@ -164,7 +173,28 @@ async function main(): Promise<void> {
 	}
 }
 
-main().catch((err: Error) => {
-	console.error(`\nError: ${err.message}`);
+main().catch(async (err: Error) => {
+	if (err instanceof LaunchError) {
+		// Save structured error context for `launchfile diagnose`
+		const { mkdirSync, writeFileSync } = await import("node:fs");
+		const { join } = await import("node:path");
+		const { homedir } = await import("node:os");
+		const errorPath = join(homedir(), ".launchfile", "last-error.json");
+		try {
+			mkdirSync(join(homedir(), ".launchfile"), { recursive: true });
+			writeFileSync(errorPath, JSON.stringify(err.toJSON(), null, 2) + "\n");
+		} catch {
+			// Best-effort — don't fail the error handler
+		}
+
+		const ctx = err.context;
+		console.error(`\nError [${ctx.phase}]: ${err.message}`);
+		if (ctx.exitCode !== undefined) {
+			console.error(`  Exit code: ${ctx.exitCode}`);
+		}
+		console.error(`\n  Run \`launchfile diagnose\` for full details.`);
+	} else {
+		console.error(`\nError: ${err.message}`);
+	}
 	process.exit(1);
 });
