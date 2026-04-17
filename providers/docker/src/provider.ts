@@ -4,9 +4,10 @@
 
 import { writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
-import { readLaunch } from "@launchfile/sdk";
+import { readLaunch, LaunchError } from "@launchfile/sdk";
 import { checkPrereqs } from "./prereqs.js";
-import { resolveSource } from "./source-resolver.js";
+import { resolveSource, type ResolvedSource } from "./source-resolver.js";
+import { buildErrorContext } from "./error-context.js";
 import {
 	loadState,
 	initState,
@@ -31,13 +32,24 @@ export interface DockerUpOpts {
 }
 
 export async function dockerUp(source: string, opts: DockerUpOpts = {}): Promise<void> {
-	// 2. Resolve source to Launchfile YAML (before span so we have the slug for context)
-	const resolved = await resolveSource(source);
+	// Track state for error context — updated as we progress through phases
+	let resolved: ResolvedSource | undefined;
+	let launch: ReturnType<typeof readLaunch> | undefined;
+	let currentPhase: import("@launchfile/sdk").LaunchPhase = "resolve";
+
+	try {
+		// 2. Resolve source to Launchfile YAML (before span so we have the slug for context)
+		resolved = await resolveSource(source);
+	} catch (err) {
+		throw new LaunchError((err as Error).message, buildErrorContext("resolve", (err as Error).message));
+	}
 
 	return withSpan("up", { source, slug: resolved.slug }, async () => {
+		try {
 		const log = getLogger();
 
 		// 1. Check prerequisites
+		currentPhase = "prereq";
 		if (!opts.dryRun) {
 			const prereqs = await checkPrereqs();
 			if (!prereqs.ok) {
@@ -48,18 +60,19 @@ export async function dockerUp(source: string, opts: DockerUpOpts = {}): Promise
 		}
 
 		// 3. Parse Launchfile
-		const launch = readLaunch(resolved.yaml);
+		currentPhase = "parse";
+		launch = readLaunch(resolved.yaml);
 		const componentNames = Object.keys(launch.components);
 
 		// Security: prompt for confirmation before executing remote Launchfiles.
 		// Remote content can specify arbitrary images, commands, and env vars.
 		if (resolved.source !== "local" && !opts.yes && !opts.dryRun) {
 			const resources = componentNames.flatMap((name) => {
-				const comp = launch.components[name];
+				const comp = launch!.components[name];
 				return (comp?.requires ?? []).map((r) => r.type);
 			});
 			const images = componentNames
-				.map((name) => launch.components[name]?.image)
+				.map((name) => launch!.components[name]?.image)
 				.filter(Boolean) as string[];
 
 			console.log(`  App: ${launch.name} (${resolved.slug})`);
@@ -121,6 +134,7 @@ export async function dockerUp(source: string, opts: DockerUpOpts = {}): Promise
 		const composeFile = composePath(resolved.slug);
 
 		// 9. Pull images — one step per image for progress visibility
+		currentPhase = "start"; // pull is part of the start lifecycle
 		await withSpan("up:pull", { images: result.images }, async () => {
 			for (const img of result.images) {
 				const t0 = Date.now();
@@ -136,7 +150,7 @@ export async function dockerUp(source: string, opts: DockerUpOpts = {}): Promise
 
 		// 10. Configure resources (if any)
 		const resources = componentNames.flatMap((name) => {
-			const comp = launch.components[name];
+			const comp = launch!.components[name];
 			return (comp?.requires ?? []).map((r) => r.type);
 		});
 		for (const res of resources) {
@@ -149,6 +163,7 @@ export async function dockerUp(source: string, opts: DockerUpOpts = {}): Promise
 		}
 
 		// 12. Start services
+		currentPhase = "start";
 		await withSpan("up:start", { project }, async () => {
 			process.stdout.write(`  \u2193 Starting services...`);
 			await shell(`docker compose -p ${project} -f "${composeFile}" up -d`, { silent: true });
@@ -156,6 +171,7 @@ export async function dockerUp(source: string, opts: DockerUpOpts = {}): Promise
 		});
 
 		// 13. Wait for health
+		currentPhase = "health";
 		await withSpan("up:health", { project }, async () => {
 			const healthy = await waitForHealth(project, composeFile);
 			if (healthy) {
@@ -168,6 +184,39 @@ export async function dockerUp(source: string, opts: DockerUpOpts = {}): Promise
 
 		// 14. Print summary
 		printSummary(launch.name, result.ports);
+
+		} catch (err) {
+			// Already a LaunchError — rethrow as-is
+			if (err instanceof LaunchError) throw err;
+
+			// Extract ShellResult if the error came from shell()
+			const shellResult = (err as Record<string, unknown>).result as
+				| import("./shell.js").ShellResult
+				| undefined;
+
+			// Capture service logs for start/health failures
+			let serviceLogs: string | undefined;
+			if ((currentPhase === "start" || currentPhase === "health") && resolved) {
+				try {
+					const project = composeProject(resolved.slug);
+					const composeFile = composePath(resolved.slug);
+					const logResult = await shell(
+						`docker compose -p ${project} -f "${composeFile}" logs --tail=100`,
+						{ allowFailure: true, silent: true },
+					);
+					serviceLogs = logResult.stdout || undefined;
+				} catch {
+					// Best-effort — don't fail the error handler
+				}
+			}
+
+			throw new LaunchError((err as Error).message, buildErrorContext(currentPhase, (err as Error).message, {
+				resolved,
+				launch,
+				shellResult,
+				serviceLogs,
+			}));
+		}
 	});
 }
 

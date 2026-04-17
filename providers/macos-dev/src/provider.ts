@@ -7,8 +7,9 @@
 
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { readLaunch, type NormalizedLaunch } from "@launchfile/sdk";
+import { readLaunch, LaunchError, type NormalizedLaunch, type LaunchPhase } from "@launchfile/sdk";
 import { checkPrereqs } from "./prereqs.js";
+import { buildErrorContext } from "./error-context.js";
 import { loadState, initState, saveState, ensureDirs } from "./state.js";
 import {
 	buildResolverContext,
@@ -37,6 +38,12 @@ export interface LaunchUpOpts {
 export async function launchUp(opts: LaunchUpOpts = {}): Promise<void> {
 	const projectDir = opts.projectDir ?? process.cwd();
 
+	// Track state for error context — updated as we progress through phases
+	let launchfileContent: string | undefined;
+	let launch: NormalizedLaunch | undefined;
+	let currentPhase: LaunchPhase = "prereq";
+
+	try {
 	// 1. Check prerequisites
 	const prereqs = await checkPrereqs();
 	if (!prereqs.ok) {
@@ -46,8 +53,8 @@ export async function launchUp(opts: LaunchUpOpts = {}): Promise<void> {
 	}
 
 	// 2. Read and parse Launchfile
+	currentPhase = "parse";
 	const launchfilePath = join(projectDir, "Launchfile");
-	let launchfileContent: string;
 	try {
 		launchfileContent = await readFile(launchfilePath, "utf8");
 	} catch {
@@ -55,7 +62,7 @@ export async function launchUp(opts: LaunchUpOpts = {}): Promise<void> {
 		process.exit(1);
 	}
 
-	const launch = readLaunch(launchfileContent);
+	launch = readLaunch(launchfileContent!);
 	const componentNames = Object.keys(launch.components);
 
 	// 3. Load or init state
@@ -71,6 +78,7 @@ export async function launchUp(opts: LaunchUpOpts = {}): Promise<void> {
 	state.secrets = await generateSecrets(launch.secrets, state.secrets);
 
 	// 6. Provision required resources
+	currentPhase = "provision";
 	const resourceMap: Record<string, ResourceProperties> = {};
 
 	for (const [_compName, component] of Object.entries(launch.components)) {
@@ -213,6 +221,7 @@ export async function launchUp(opts: LaunchUpOpts = {}): Promise<void> {
 	}
 
 	// 14. Run build commands
+	currentPhase = "build";
 	if (!opts.noBuild) {
 		for (const [name, component] of Object.entries(launch.components)) {
 			const buildCmd = component.commands?.build?.command;
@@ -228,6 +237,7 @@ export async function launchUp(opts: LaunchUpOpts = {}): Promise<void> {
 	}
 
 	// 15. Run release commands (migrations)
+	currentPhase = "release";
 	for (const [name, component] of Object.entries(launch.components)) {
 		const releaseCmd = component.commands?.release?.command;
 		if (releaseCmd) {
@@ -240,6 +250,7 @@ export async function launchUp(opts: LaunchUpOpts = {}): Promise<void> {
 	}
 
 	// 16. Start all components
+	currentPhase = "start";
 	process.stdout.write(`  \u2193 Starting services...`);
 	const pm2 = new ProcessManager(projectDir);
 
@@ -277,6 +288,24 @@ export async function launchUp(opts: LaunchUpOpts = {}): Promise<void> {
 
 	// Save final state
 	await saveState(projectDir, state);
+
+	} catch (err) {
+		// Already a LaunchError — rethrow as-is
+		if (err instanceof LaunchError) throw err;
+
+		// Extract shell result if available
+		const shellResult = (err as Record<string, unknown>).result as
+			| { exitCode?: number; stdout?: string; stderr?: string }
+			| undefined;
+
+		throw new LaunchError((err as Error).message, buildErrorContext(currentPhase, (err as Error).message, {
+			launch,
+			launchfileYaml: launchfileContent,
+			exitCode: shellResult?.exitCode,
+			stdout: shellResult?.stdout,
+			stderr: shellResult?.stderr,
+		}));
+	}
 }
 
 function printSummary(
